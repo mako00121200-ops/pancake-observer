@@ -17,10 +17,15 @@ const PREDICTION_ABI = [
 const provider = new ethers.JsonRpcProvider(BSC_RPC);
 const contract = new ethers.Contract(PREDICTION_CONTRACT, PREDICTION_ABI, provider);
 
-async function getBinancePrice() {
-  const res = await fetch("https://api.binance.com/api/v3/ticker/price?symbol=BNBUSDT");
-  const data = await res.json();
-  return parseFloat(data.price);
+async function getRealtimePrice() {
+  try {
+    const res = await fetch("https://api.bybit.com/v5/market/tickers?category=spot&symbol=BNBUSDT");
+    const data = await res.json();
+    return parseFloat(data.result.list[0].lastPrice);
+  } catch (e) {
+    console.error("price fetch error:", e.message);
+    return null;
+  }
 }
 
 function writeLog(record) {
@@ -31,7 +36,7 @@ function writeLog(record) {
   });
 }
 
-async function logRound(epoch, binancePrice, now) {
+async function logRound(epoch, realtimePrice, now) {
   try {
     const r = await contract.rounds(epoch);
     writeLog({
@@ -45,7 +50,7 @@ async function logRound(epoch, binancePrice, now) {
       bear: ethers.formatEther(r.bearAmount),
       total: ethers.formatEther(r.totalAmount),
       oracleCalled: r.oracleCalled,
-      binancePrice
+      realtimePrice
     });
   } catch (e) {
     console.error("round fetch error", epoch.toString(), e.message);
@@ -55,12 +60,12 @@ async function logRound(epoch, binancePrice, now) {
 async function poll() {
   try {
     const epoch = await contract.currentEpoch();
-    const binancePrice = await getBinancePrice();
+    const realtimePrice = await getRealtimePrice();
     const now = Math.floor(Date.now() / 1000);
 
-    await logRound(epoch, binancePrice, now);
-    await logRound(epoch - 1n, binancePrice, now);
-    await logRound(epoch - 2n, binancePrice, now);
+    await logRound(epoch, realtimePrice, now);
+    await logRound(epoch - 1n, realtimePrice, now);
+    await logRound(epoch - 2n, realtimePrice, now);
   } catch (err) {
     console.error("poll error:", err.message);
   }
