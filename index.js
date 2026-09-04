@@ -3,6 +3,8 @@ const { ethers } = require("ethers");
 
 const BSC_RPC = "https://bsc-dataseed.binance.org/";
 const PREDICTION_CONTRACT = "0x18B2A687610328590Bc8F2e5fEdDe3b582A49cdA";
+const PAIR_ADDRESS = "0x16b9a82891338f9ba80e2d6970fdda79d1eb0dae";
+const USDT_ADDRESS = "0x55d398326f99059fF775485246999027B3197955";
 const POLL_INTERVAL_MS = 5000;
 const DATA_DIR = "/data";
 const LOG_FILE = `${DATA_DIR}/log.jsonl`;
@@ -13,15 +15,29 @@ const PREDICTION_ABI = [
   "function currentEpoch() view returns (uint256)",
   "function rounds(uint256) view returns (uint256 epoch, uint256 startTimestamp, uint256 lockTimestamp, uint256 closeTimestamp, int256 lockPrice, int256 closePrice, uint256 lockOracleId, uint256 closeOracleId, uint256 totalAmount, uint256 bullAmount, uint256 bearAmount, uint256 rewardBaseCalAmount, uint256 rewardAmount, bool oracleCalled)"
 ];
+const PAIR_ABI = [
+  "function getReserves() view returns (uint112 reserve0, uint112 reserve1, uint32 blockTimestampLast)",
+  "function token0() view returns (address)"
+];
 
 const provider = new ethers.JsonRpcProvider(BSC_RPC);
 const contract = new ethers.Contract(PREDICTION_CONTRACT, PREDICTION_ABI, provider);
+const pairContract = new ethers.Contract(PAIR_ADDRESS, PAIR_ABI, provider);
+
+let token0IsUsdt = null;
 
 async function getRealtimePrice() {
   try {
-    const res = await fetch("https://api.bybit.com/v5/market/tickers?category=spot&symbol=BNBUSDT");
-    const data = await res.json();
-    return parseFloat(data.result.list[0].lastPrice);
+    if (token0IsUsdt === null) {
+      const t0 = await pairContract.token0();
+      token0IsUsdt = t0.toLowerCase() === USDT_ADDRESS.toLowerCase();
+    }
+    const [r0, r1] = await pairContract.getReserves();
+    const usdtReserve = token0IsUsdt ? r0 : r1;
+    const wbnbReserve = token0IsUsdt ? r1 : r0;
+    const usdtNum = parseFloat(ethers.formatUnits(usdtReserve, 18));
+    const wbnbNum = parseFloat(ethers.formatUnits(wbnbReserve, 18));
+    return usdtNum / wbnbNum;
   } catch (e) {
     console.error("price fetch error:", e.message);
     return null;
