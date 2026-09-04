@@ -46,7 +46,7 @@ async function getRealtimePrice() {
 
 function writeLog(record) {
   const line = JSON.stringify(record) + "\n";
-  console.log(line.trim());
+  console.log(`CHECK epoch=${record.epoch} price=${record.realtimePrice} bull=${record.bull} bear=${record.bear} lockPrice=${record.lockPrice}`);
   fs.appendFile(LOG_FILE, line, (err) => {
     if (err) console.error("file write error:", err.message);
   });
