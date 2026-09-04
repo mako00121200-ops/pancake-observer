@@ -1,4 +1,5 @@
 const fs = require("fs");
+const http = require("http");
 const { ethers } = require("ethers");
 
 const BSC_RPC = "https://bsc-dataseed.binance.org/";
@@ -89,3 +90,45 @@ async function poll() {
 
 setInterval(poll, POLL_INTERVAL_MS);
 poll();
+
+function renderDashboard() {
+  let lines = [];
+  try {
+    lines = fs.readFileSync(LOG_FILE, "utf8").trim().split("\n").filter(Boolean);
+  } catch (e) {
+    return `<p>まだデータがありません</p>`;
+  }
+  const byEpoch = {};
+  for (const line of lines) {
+    try {
+      const rec = JSON.parse(line);
+      byEpoch[rec.epoch] = rec;
+    } catch (e) {}
+  }
+  const epochs = Object.keys(byEpoch).map(Number).sort((a, b) => b - a).slice(0, 50);
+  const rows = epochs.map(ep => {
+    const r = byEpoch[ep];
+    const lockPrice = r.lockPrice && r.lockPrice !== "0" ? (Number(r.lockPrice) / 1e8).toFixed(2) : "-";
+    const closePrice = r.closePrice && r.closePrice !== "0" ? (Number(r.closePrice) / 1e8).toFixed(2) : "-";
+    const result = r.oracleCalled ? (Number(r.closePrice) > Number(r.lockPrice) ? "UP" : "DOWN") : "-";
+    return `<tr><td>${r.epoch}</td><td>${lockPrice}</td><td>${closePrice}</td><td>${result}</td><td>${Number(r.bull).toFixed(3)}</td><td>${Number(r.bear).toFixed(3)}</td><td>${r.realtimePrice ? r.realtimePrice.toFixed(2) : "-"}</td><td>${r.oracleCalled ? "確定済" : "進行中"}</td></tr>`;
+  }).join("");
+
+  return `<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+  <style>
+    body { font-family: -apple-system, sans-serif; background:#0d1117; color:#c9d1d9; padding:10px; }
+    table { border-collapse: collapse; width:100%; font-size:12px; }
+    th, td { border:1px solid #30363d; padding:4px 6px; text-align:right; }
+    th { background:#161b22; }
+    h1 { font-size:18px; }
+  </style></head><body>
+  <h1>PancakeSwap Prediction 観測データ</h1>
+  <p>記録件数: ${lines.length} / 表示: 最新50ラウンド</p>
+  <table><tr><th>Epoch</th><th>Lock</th><th>Close</th><th>結果</th><th>Bull</th><th>Bear</th><th>実勢価格</th><th>状態</th></tr>${rows}</table>
+  </body></html>`;
+}
+
+http.createServer((req, res) => {
+  res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
+  res.end(renderDashboard());
+}).listen(process.env.PORT || 3000);
