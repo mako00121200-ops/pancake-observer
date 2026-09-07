@@ -26,6 +26,15 @@ const contract = new ethers.Contract(PREDICTION_CONTRACT, PREDICTION_ABI, provid
 const pairContract = new ethers.Contract(PAIR_ADDRESS, PAIR_ABI, provider);
 
 let token0IsUsdt = null;
+const preLockSnapshot = {};
+const settled = {};
+const stats = {
+  resolved: 0,
+  oracleLagCorrect: 0,
+  oracleLagTotal: 0,
+  poolMajorityCorrect: 0,
+  poolMajorityTotal: 0,
+};
 
 async function getRealtimePrice() {
   try {
@@ -56,18 +65,48 @@ function writeLog(record) {
 async function logRound(epoch, realtimePrice, now) {
   try {
     const r = await contract.rounds(epoch);
+    const epochStr = epoch.toString();
+    const lockPriceStr = r.lockPrice.toString();
+    const closePriceStr = r.closePrice.toString();
+
+    if (lockPriceStr === "0" && realtimePrice !== null) {
+      preLockSnapshot[epochStr] = {
+        price: realtimePrice,
+        bull: parseFloat(ethers.formatEther(r.bullAmount)),
+        bear: parseFloat(ethers.formatEther(r.bearAmount)),
+      };
+    }
+
+    if (r.oracleCalled && lockPriceStr !== "0" && closePriceStr !== "0" && !settled[epochStr]) {
+      settled[epochStr] = true;
+      const lockPriceUsd = Number(lockPriceStr) / 1e8;
+      const closePriceUsd = Number(closePriceStr) / 1e8;
+      const actualUp = closePriceUsd > lockPriceUsd;
+      stats.resolved++;
+
+      const snap = preLockSnapshot[epochStr];
+      if (snap) {
+        const signalUp = snap.price > lockPriceUsd;
+        stats.oracleLagTotal++;
+        if (signalUp === actualUp) stats.oracleLagCorrect++;
+
+        if (snap.bull !== snap.bear) {
+          const poolMajorityIsBull = snap.bull > snap.bear;
+          stats.poolMajorityTotal++;
+          if (poolMajorityIsBull === actualUp) stats.poolMajorityCorrect++;
+        }
+      }
+      delete preLockSnapshot[epochStr];
+
+      console.log(`RESULT epoch=${epochStr} lock=${lockPriceUsd.toFixed(2)} close=${closePriceUsd.toFixed(2)} actual=${actualUp ? "UP" : "DOWN"} preLockPrice=${snap ? snap.price.toFixed(2) : "NA"} bull=${snap ? snap.bull.toFixed(3) : "NA"} bear=${snap ? snap.bear.toFixed(3) : "NA"}`);
+    }
+
     writeLog({
-      t: now,
-      epoch: epoch.toString(),
-      lockTs: r.lockTimestamp.toString(),
-      closeTs: r.closeTimestamp.toString(),
-      lockPrice: r.lockPrice.toString(),
-      closePrice: r.closePrice.toString(),
-      bull: ethers.formatEther(r.bullAmount),
-      bear: ethers.formatEther(r.bearAmount),
-      total: ethers.formatEther(r.totalAmount),
-      oracleCalled: r.oracleCalled,
-      realtimePrice
+      t: now, epoch: epochStr,
+      lockTs: r.lockTimestamp.toString(), closeTs: r.closeTimestamp.toString(),
+      lockPrice: lockPriceStr, closePrice: closePriceStr,
+      bull: ethers.formatEther(r.bullAmount), bear: ethers.formatEther(r.bearAmount),
+      total: ethers.formatEther(r.totalAmount), oracleCalled: r.oracleCalled, realtimePrice
     });
   } catch (e) {
     console.error("round fetch error", epoch.toString(), e.message);
@@ -79,7 +118,6 @@ async function poll() {
     const epoch = await contract.currentEpoch();
     const realtimePrice = await getRealtimePrice();
     const now = Math.floor(Date.now() / 1000);
-
     await logRound(epoch, realtimePrice, now);
     await logRound(epoch - 1n, realtimePrice, now);
     await logRound(epoch - 2n, realtimePrice, now);
@@ -91,6 +129,12 @@ async function poll() {
 setInterval(poll, POLL_INTERVAL_MS);
 poll();
 
+setInterval(() => {
+  const oracleLagWinRate = stats.oracleLagTotal > 0 ? (stats.oracleLagCorrect / stats.oracleLagTotal * 100).toFixed(1) : "N/A";
+  const poolMajorityWinRate = stats.poolMajorityTotal > 0 ? (stats.poolMajorityCorrect / stats.poolMajorityTotal * 100).toFixed(1) : "N/A";
+  console.log(`SUMMARY resolved=${stats.resolved} oracleLag_winrate=${oracleLagWinRate}%(${stats.oracleLagCorrect}/${stats.oracleLagTotal}) poolMajority_winrate=${poolMajorityWinRate}%(${stats.poolMajorityCorrect}/${stats.poolMajorityTotal})`);
+}, 60000);
+
 function renderDashboard() {
   let lines = [];
   try {
@@ -100,10 +144,7 @@ function renderDashboard() {
   }
   const byEpoch = {};
   for (const line of lines) {
-    try {
-      const rec = JSON.parse(line);
-      byEpoch[rec.epoch] = rec;
-    } catch (e) {}
+    try { const rec = JSON.parse(line); byEpoch[rec.epoch] = rec; } catch (e) {}
   }
   const epochs = Object.keys(byEpoch).map(Number).sort((a, b) => b - a).slice(0, 50);
   const rows = epochs.map(ep => {
@@ -113,17 +154,12 @@ function renderDashboard() {
     const result = r.oracleCalled ? (Number(r.closePrice) > Number(r.lockPrice) ? "UP" : "DOWN") : "-";
     return `<tr><td>${r.epoch}</td><td>${lockPrice}</td><td>${closePrice}</td><td>${result}</td><td>${Number(r.bull).toFixed(3)}</td><td>${Number(r.bear).toFixed(3)}</td><td>${r.realtimePrice ? r.realtimePrice.toFixed(2) : "-"}</td><td>${r.oracleCalled ? "確定済" : "進行中"}</td></tr>`;
   }).join("");
-
+  const oracleLagWinRate = stats.oracleLagTotal > 0 ? (stats.oracleLagCorrect / stats.oracleLagTotal * 100).toFixed(1) : "N/A";
+  const poolMajorityWinRate = stats.poolMajorityTotal > 0 ? (stats.poolMajorityCorrect / stats.poolMajorityTotal * 100).toFixed(1) : "N/A";
   return `<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-  <style>
-    body { font-family: -apple-system, sans-serif; background:#0d1117; color:#c9d1d9; padding:10px; }
-    table { border-collapse: collapse; width:100%; font-size:12px; }
-    th, td { border:1px solid #30363d; padding:4px 6px; text-align:right; }
-    th { background:#161b22; }
-    h1 { font-size:18px; }
-  </style></head><body>
+  <style>body{font-family:-apple-system,sans-serif;background:#0d1117;color:#c9d1d9;padding:10px;}table{border-collapse:collapse;width:100%;font-size:12px;}th,td{border:1px solid #30363d;padding:4px 6px;text-align:right;}th{background:#161b22;}h1{font-size:18px;}</style></head><body>
   <h1>PancakeSwap Prediction 観測データ</h1>
-  <p>記録件数: ${lines.length} / 表示: 最新50ラウンド</p>
+  <p>確定ラウンド数: ${stats.resolved} / オラクル遅延シグナル勝率: ${oracleLagWinRate}%(${stats.oracleLagCorrect}/${stats.oracleLagTotal}) / プール多数派勝率: ${poolMajorityWinRate}%(${stats.poolMajorityCorrect}/${stats.poolMajorityTotal})</p>
   <table><tr><th>Epoch</th><th>Lock</th><th>Close</th><th>結果</th><th>Bull</th><th>Bear</th><th>実勢価格</th><th>状態</th></tr>${rows}</table>
   </body></html>`;
 }
