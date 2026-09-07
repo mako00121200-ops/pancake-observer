@@ -36,6 +36,52 @@ const stats = {
   poolMajorityTotal: 0,
 };
 
+function evaluateRound(epochStr, lockPriceStr, closePriceStr, snap) {
+  const lockPriceUsd = Number(lockPriceStr) / 1e8;
+  const closePriceUsd = Number(closePriceStr) / 1e8;
+  const actualUp = closePriceUsd > lockPriceUsd;
+  stats.resolved++;
+  if (snap) {
+    const signalUp = snap.price > lockPriceUsd;
+    stats.oracleLagTotal++;
+    if (signalUp === actualUp) stats.oracleLagCorrect++;
+    if (snap.bull !== snap.bear) {
+      const poolMajorityIsBull = snap.bull > snap.bear;
+      stats.poolMajorityTotal++;
+      if (poolMajorityIsBull === actualUp) stats.poolMajorityCorrect++;
+    }
+  }
+}
+
+function backfillStats() {
+  let lines = [];
+  try {
+    lines = fs.readFileSync(LOG_FILE, "utf8").trim().split("\n").filter(Boolean);
+  } catch (e) {
+    console.log("BACKFILL_SKIP no existing log file");
+    return;
+  }
+  const snapshot = {};
+  const done = {};
+  for (const line of lines) {
+    let rec;
+    try { rec = JSON.parse(line); } catch (e) { continue; }
+    const epochStr = rec.epoch;
+    if (rec.lockPrice === "0" && rec.realtimePrice) {
+      snapshot[epochStr] = {
+        price: rec.realtimePrice,
+        bull: parseFloat(rec.bull),
+        bear: parseFloat(rec.bear),
+      };
+    }
+    if (rec.oracleCalled && rec.lockPrice !== "0" && rec.closePrice !== "0" && !done[epochStr]) {
+      done[epochStr] = true;
+      evaluateRound(epochStr, rec.lockPrice, rec.closePrice, snapshot[epochStr]);
+    }
+  }
+  console.log(`BACKFILL_DONE lines=${lines.length} resolved=${stats.resolved} oracleLagTotal=${stats.oracleLagTotal} oracleLagCorrect=${stats.oracleLagCorrect} poolMajorityTotal=${stats.poolMajorityTotal} poolMajorityCorrect=${stats.poolMajorityCorrect}`);
+}
+
 async function getRealtimePrice() {
   try {
     if (token0IsUsdt === null) {
@@ -79,26 +125,10 @@ async function logRound(epoch, realtimePrice, now) {
 
     if (r.oracleCalled && lockPriceStr !== "0" && closePriceStr !== "0" && !settled[epochStr]) {
       settled[epochStr] = true;
-      const lockPriceUsd = Number(lockPriceStr) / 1e8;
-      const closePriceUsd = Number(closePriceStr) / 1e8;
-      const actualUp = closePriceUsd > lockPriceUsd;
-      stats.resolved++;
-
       const snap = preLockSnapshot[epochStr];
-      if (snap) {
-        const signalUp = snap.price > lockPriceUsd;
-        stats.oracleLagTotal++;
-        if (signalUp === actualUp) stats.oracleLagCorrect++;
-
-        if (snap.bull !== snap.bear) {
-          const poolMajorityIsBull = snap.bull > snap.bear;
-          stats.poolMajorityTotal++;
-          if (poolMajorityIsBull === actualUp) stats.poolMajorityCorrect++;
-        }
-      }
+      evaluateRound(epochStr, lockPriceStr, closePriceStr, snap);
       delete preLockSnapshot[epochStr];
-
-      console.log(`RESULT epoch=${epochStr} lock=${lockPriceUsd.toFixed(2)} close=${closePriceUsd.toFixed(2)} actual=${actualUp ? "UP" : "DOWN"} preLockPrice=${snap ? snap.price.toFixed(2) : "NA"} bull=${snap ? snap.bull.toFixed(3) : "NA"} bear=${snap ? snap.bear.toFixed(3) : "NA"}`);
+      console.log(`RESULT epoch=${epochStr} lock=${(Number(lockPriceStr)/1e8).toFixed(2)} close=${(Number(closePriceStr)/1e8).toFixed(2)}`);
     }
 
     writeLog({
@@ -126,6 +156,7 @@ async function poll() {
   }
 }
 
+backfillStats();
 setInterval(poll, POLL_INTERVAL_MS);
 poll();
 
