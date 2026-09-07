@@ -30,25 +30,36 @@ const preLockSnapshot = {};
 const settled = {};
 const stats = {
   resolved: 0,
-  oracleLagCorrect: 0,
-  oracleLagTotal: 0,
-  poolMajorityCorrect: 0,
-  poolMajorityTotal: 0,
+  oracleLagCorrect: 0, oracleLagTotal: 0, oracleLagPnl: 0,
+  poolMajorityCorrect: 0, poolMajorityTotal: 0, poolMajorityPnl: 0,
 };
 
-function evaluateRound(epochStr, lockPriceStr, closePriceStr, snap) {
+function evaluateRound(epochStr, lockPriceStr, closePriceStr, snap, finalBull, finalBear, finalTotal) {
   const lockPriceUsd = Number(lockPriceStr) / 1e8;
   const closePriceUsd = Number(closePriceStr) / 1e8;
   const actualUp = closePriceUsd > lockPriceUsd;
   stats.resolved++;
-  if (snap) {
-    const signalUp = snap.price > lockPriceUsd;
-    stats.oracleLagTotal++;
-    if (signalUp === actualUp) stats.oracleLagCorrect++;
-    if (snap.bull !== snap.bear) {
-      const poolMajorityIsBull = snap.bull > snap.bear;
-      stats.poolMajorityTotal++;
-      if (poolMajorityIsBull === actualUp) stats.poolMajorityCorrect++;
+  if (!snap) return;
+
+  const signalUp = snap.price > lockPriceUsd;
+  stats.oracleLagTotal++;
+  const signalWinPool = signalUp ? finalBull : finalBear;
+  if (signalUp === actualUp) {
+    stats.oracleLagCorrect++;
+    stats.oracleLagPnl += signalWinPool > 0 ? (0.97 * finalTotal / signalWinPool) - 1 : -1;
+  } else {
+    stats.oracleLagPnl -= 1;
+  }
+
+  if (snap.bull !== snap.bear) {
+    const majorityIsBull = snap.bull > snap.bear;
+    stats.poolMajorityTotal++;
+    const majorityWinPool = majorityIsBull ? finalBull : finalBear;
+    if (majorityIsBull === actualUp) {
+      stats.poolMajorityCorrect++;
+      stats.poolMajorityPnl += majorityWinPool > 0 ? (0.97 * finalTotal / majorityWinPool) - 1 : -1;
+    } else {
+      stats.poolMajorityPnl -= 1;
     }
   }
 }
@@ -68,18 +79,14 @@ function backfillStats() {
     try { rec = JSON.parse(line); } catch (e) { continue; }
     const epochStr = rec.epoch;
     if (rec.lockPrice === "0" && rec.realtimePrice) {
-      snapshot[epochStr] = {
-        price: rec.realtimePrice,
-        bull: parseFloat(rec.bull),
-        bear: parseFloat(rec.bear),
-      };
+      snapshot[epochStr] = { price: rec.realtimePrice, bull: parseFloat(rec.bull), bear: parseFloat(rec.bear) };
     }
     if (rec.oracleCalled && rec.lockPrice !== "0" && rec.closePrice !== "0" && !done[epochStr]) {
       done[epochStr] = true;
-      evaluateRound(epochStr, rec.lockPrice, rec.closePrice, snapshot[epochStr]);
+      evaluateRound(epochStr, rec.lockPrice, rec.closePrice, snapshot[epochStr], parseFloat(rec.bull), parseFloat(rec.bear), parseFloat(rec.total));
     }
   }
-  console.log(`BACKFILL_DONE lines=${lines.length} resolved=${stats.resolved} oracleLagTotal=${stats.oracleLagTotal} oracleLagCorrect=${stats.oracleLagCorrect} poolMajorityTotal=${stats.poolMajorityTotal} poolMajorityCorrect=${stats.poolMajorityCorrect}`);
+  console.log(`BACKFILL_DONE lines=${lines.length} resolved=${stats.resolved} oracleLagPnl=${stats.oracleLagPnl.toFixed(3)} poolMajorityPnl=${stats.poolMajorityPnl.toFixed(3)}`);
 }
 
 async function getRealtimePrice() {
@@ -126,7 +133,12 @@ async function logRound(epoch, realtimePrice, now) {
     if (r.oracleCalled && lockPriceStr !== "0" && closePriceStr !== "0" && !settled[epochStr]) {
       settled[epochStr] = true;
       const snap = preLockSnapshot[epochStr];
-      evaluateRound(epochStr, lockPriceStr, closePriceStr, snap);
+      evaluateRound(
+        epochStr, lockPriceStr, closePriceStr, snap,
+        parseFloat(ethers.formatEther(r.bullAmount)),
+        parseFloat(ethers.formatEther(r.bearAmount)),
+        parseFloat(ethers.formatEther(r.totalAmount))
+      );
       delete preLockSnapshot[epochStr];
       console.log(`RESULT epoch=${epochStr} lock=${(Number(lockPriceStr)/1e8).toFixed(2)} close=${(Number(closePriceStr)/1e8).toFixed(2)}`);
     }
@@ -163,7 +175,9 @@ poll();
 setInterval(() => {
   const oracleLagWinRate = stats.oracleLagTotal > 0 ? (stats.oracleLagCorrect / stats.oracleLagTotal * 100).toFixed(1) : "N/A";
   const poolMajorityWinRate = stats.poolMajorityTotal > 0 ? (stats.poolMajorityCorrect / stats.poolMajorityTotal * 100).toFixed(1) : "N/A";
-  console.log(`SUMMARY resolved=${stats.resolved} oracleLag_winrate=${oracleLagWinRate}%(${stats.oracleLagCorrect}/${stats.oracleLagTotal}) poolMajority_winrate=${poolMajorityWinRate}%(${stats.poolMajorityCorrect}/${stats.poolMajorityTotal})`);
+  const oracleLagRoi = stats.oracleLagTotal > 0 ? (stats.oracleLagPnl / stats.oracleLagTotal * 100).toFixed(2) : "N/A";
+  const poolMajorityRoi = stats.poolMajorityTotal > 0 ? (stats.poolMajorityPnl / stats.poolMajorityTotal * 100).toFixed(2) : "N/A";
+  console.log(`SUMMARY resolved=${stats.resolved} oracleLag_winrate=${oracleLagWinRate}% oracleLag_roi=${oracleLagRoi}% poolMajority_winrate=${poolMajorityWinRate}% poolMajority_roi=${poolMajorityRoi}%`);
 }, 60000);
 
 function renderDashboard() {
@@ -187,10 +201,14 @@ function renderDashboard() {
   }).join("");
   const oracleLagWinRate = stats.oracleLagTotal > 0 ? (stats.oracleLagCorrect / stats.oracleLagTotal * 100).toFixed(1) : "N/A";
   const poolMajorityWinRate = stats.poolMajorityTotal > 0 ? (stats.poolMajorityCorrect / stats.poolMajorityTotal * 100).toFixed(1) : "N/A";
+  const oracleLagRoi = stats.oracleLagTotal > 0 ? (stats.oracleLagPnl / stats.oracleLagTotal * 100).toFixed(2) : "N/A";
+  const poolMajorityRoi = stats.poolMajorityTotal > 0 ? (stats.poolMajorityPnl / stats.poolMajorityTotal * 100).toFixed(2) : "N/A";
   return `<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
   <style>body{font-family:-apple-system,sans-serif;background:#0d1117;color:#c9d1d9;padding:10px;}table{border-collapse:collapse;width:100%;font-size:12px;}th,td{border:1px solid #30363d;padding:4px 6px;text-align:right;}th{background:#161b22;}h1{font-size:18px;}</style></head><body>
   <h1>PancakeSwap Prediction 観測データ</h1>
-  <p>確定ラウンド数: ${stats.resolved} / オラクル遅延シグナル勝率: ${oracleLagWinRate}%(${stats.oracleLagCorrect}/${stats.oracleLagTotal}) / プール多数派勝率: ${poolMajorityWinRate}%(${stats.poolMajorityCorrect}/${stats.poolMajorityTotal})</p>
+  <p>確定ラウンド数: ${stats.resolved}</p>
+  <p>オラクル遅延: 勝率${oracleLagWinRate}% / ROI ${oracleLagRoi}%(1ラウンド1単位賭けた場合)</p>
+  <p>プール多数派: 勝率${poolMajorityWinRate}% / ROI ${poolMajorityRoi}%(1ラウンド1単位賭けた場合)</p>
   <table><tr><th>Epoch</th><th>Lock</th><th>Close</th><th>結果</th><th>Bull</th><th>Bear</th><th>実勢価格</th><th>状態</th></tr>${rows}</table>
   </body></html>`;
 }
