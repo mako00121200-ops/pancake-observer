@@ -89,6 +89,119 @@ function backfillStats() {
   console.log(`BACKFILL_DONE lines=${lines.length} resolved=${stats.resolved} oracleLagPnl=${stats.oracleLagPnl.toFixed(3)} poolMajorityPnl=${stats.poolMajorityPnl.toFixed(3)}`);
 }
 
+function deepAnalysis() {
+  let lines = [];
+  try {
+    lines = fs.readFileSync(LOG_FILE, "utf8").trim().split("\n").filter(Boolean);
+  } catch (e) { return; }
+
+  const snapshot = {};
+  const done = {};
+  const resolvedList = [];
+
+  for (const line of lines) {
+    let rec;
+    try { rec = JSON.parse(line); } catch (e) { continue; }
+    const epochStr = rec.epoch;
+    if (rec.lockPrice === "0" && rec.realtimePrice) {
+      snapshot[epochStr] = { price: rec.realtimePrice, bull: parseFloat(rec.bull), bear: parseFloat(rec.bear) };
+    }
+    if (rec.oracleCalled && rec.lockPrice !== "0" && rec.closePrice !== "0" && !done[epochStr]) {
+      done[epochStr] = true;
+      const lockPriceUsd = Number(rec.lockPrice) / 1e8;
+      const closePriceUsd = Number(rec.closePrice) / 1e8;
+      resolvedList.push({
+        epoch: epochStr,
+        actualUp: closePriceUsd > lockPriceUsd,
+        snap: snapshot[epochStr],
+        finalBull: parseFloat(rec.bull),
+        finalBear: parseFloat(rec.bear),
+        finalTotal: parseFloat(rec.total),
+      });
+    }
+  }
+
+  const buckets = [
+    { label: "0-5pct", min: 0, max: 0.05 },
+    { label: "5-10pct", min: 0.05, max: 0.10 },
+    { label: "10-20pct", min: 0.10, max: 0.20 },
+    { label: "20-35pct", min: 0.20, max: 0.35 },
+    { label: "35pct+", min: 0.35, max: 1.01 },
+  ].map(b => ({ ...b, majorityWin: 0, majorityTotal: 0, majorityPnl: 0, contrarianPnl: 0 }));
+
+  for (const r of resolvedList) {
+    if (!r.snap || r.snap.bull === r.snap.bear) continue;
+    const totalSnap = r.snap.bull + r.snap.bear;
+    const balance = Math.abs(r.snap.bull / totalSnap - 0.5);
+    const bucket = buckets.find(b => balance >= b.min && balance < b.max);
+    if (!bucket) continue;
+
+    const majorityIsBull = r.snap.bull > r.snap.bear;
+    const majorityWinPool = majorityIsBull ? r.finalBull : r.finalBear;
+    bucket.majorityTotal++;
+    if (majorityIsBull === r.actualUp) {
+      bucket.majorityWin++;
+      bucket.majorityPnl += majorityWinPool > 0 ? (0.97 * r.finalTotal / majorityWinPool) - 1 : -1;
+    } else {
+      bucket.majorityPnl -= 1;
+    }
+    const minorityWinPool = majorityIsBull ? r.finalBear : r.finalBull;
+    if (majorityIsBull !== r.actualUp) {
+      bucket.contrarianPnl += minorityWinPool > 0 ? (0.97 * r.finalTotal / minorityWinPool) - 1 : -1;
+    } else {
+      bucket.contrarianPnl -= 1;
+    }
+  }
+
+  console.log("DEEPANALYSIS_BALANCE_START");
+  for (const b of buckets) {
+    const majWr = b.majorityTotal > 0 ? (b.majorityWin / b.majorityTotal * 100).toFixed(1) : "N/A";
+    const majRoi = b.majorityTotal > 0 ? (b.majorityPnl / b.majorityTotal * 100).toFixed(2) : "N/A";
+    const conRoi = b.majorityTotal > 0 ? (b.contrarianPnl / b.majorityTotal * 100).toFixed(2) : "N/A";
+    console.log(`BALANCE bucket=${b.label} n=${b.majorityTotal} majority_wr=${majWr}% majority_roi=${majRoi}% contrarian_roi=${conRoi}%`);
+  }
+  console.log("DEEPANALYSIS_BALANCE_END");
+
+  const streakStats = {};
+  let currentStreakDir = null;
+  let currentStreakLen = 0;
+
+  for (const r of resolvedList) {
+    const streakLenBefore = currentStreakLen;
+    const streakDirBefore = currentStreakDir;
+
+    if (streakLenBefore >= 2 && r.snap) {
+      const key = Math.min(streakLenBefore, 5);
+      if (!streakStats[key]) streakStats[key] = { reversal: 0, total: 0, reversalPnl: 0 };
+      const reversed = r.actualUp !== streakDirBefore;
+      const betWinPool = (!streakDirBefore) ? r.finalBull : r.finalBear;
+      streakStats[key].total++;
+      if (reversed) {
+        streakStats[key].reversal++;
+        streakStats[key].reversalPnl += betWinPool > 0 ? (0.97 * r.finalTotal / betWinPool) - 1 : -1;
+      } else {
+        streakStats[key].reversalPnl -= 1;
+      }
+    }
+
+    if (r.actualUp === currentStreakDir) {
+      currentStreakLen++;
+    } else {
+      currentStreakDir = r.actualUp;
+      currentStreakLen = 1;
+    }
+  }
+
+  console.log("DEEPANALYSIS_STREAK_START");
+  for (const key of Object.keys(streakStats).sort()) {
+    const s = streakStats[key];
+    const reversalRate = (s.reversal / s.total * 100).toFixed(1);
+    const roi = (s.reversalPnl / s.total * 100).toFixed(2);
+    console.log(`STREAK len=${key}${key == 5 ? "plus" : ""} n=${s.total} reversal_rate=${reversalRate}% reversal_bet_roi=${roi}%`);
+  }
+  console.log("DEEPANALYSIS_STREAK_END");
+}
+
 async function getRealtimePrice() {
   try {
     if (token0IsUsdt === null) {
@@ -169,6 +282,7 @@ async function poll() {
 }
 
 backfillStats();
+deepAnalysis();
 setInterval(poll, POLL_INTERVAL_MS);
 poll();
 
@@ -199,16 +313,10 @@ function renderDashboard() {
     const result = r.oracleCalled ? (Number(r.closePrice) > Number(r.lockPrice) ? "UP" : "DOWN") : "-";
     return `<tr><td>${r.epoch}</td><td>${lockPrice}</td><td>${closePrice}</td><td>${result}</td><td>${Number(r.bull).toFixed(3)}</td><td>${Number(r.bear).toFixed(3)}</td><td>${r.realtimePrice ? r.realtimePrice.toFixed(2) : "-"}</td><td>${r.oracleCalled ? "確定済" : "進行中"}</td></tr>`;
   }).join("");
-  const oracleLagWinRate = stats.oracleLagTotal > 0 ? (stats.oracleLagCorrect / stats.oracleLagTotal * 100).toFixed(1) : "N/A";
-  const poolMajorityWinRate = stats.poolMajorityTotal > 0 ? (stats.poolMajorityCorrect / stats.poolMajorityTotal * 100).toFixed(1) : "N/A";
-  const oracleLagRoi = stats.oracleLagTotal > 0 ? (stats.oracleLagPnl / stats.oracleLagTotal * 100).toFixed(2) : "N/A";
-  const poolMajorityRoi = stats.poolMajorityTotal > 0 ? (stats.poolMajorityPnl / stats.poolMajorityTotal * 100).toFixed(2) : "N/A";
   return `<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
   <style>body{font-family:-apple-system,sans-serif;background:#0d1117;color:#c9d1d9;padding:10px;}table{border-collapse:collapse;width:100%;font-size:12px;}th,td{border:1px solid #30363d;padding:4px 6px;text-align:right;}th{background:#161b22;}h1{font-size:18px;}</style></head><body>
   <h1>PancakeSwap Prediction 観測データ</h1>
   <p>確定ラウンド数: ${stats.resolved}</p>
-  <p>オラクル遅延: 勝率${oracleLagWinRate}% / ROI ${oracleLagRoi}%(1ラウンド1単位賭けた場合)</p>
-  <p>プール多数派: 勝率${poolMajorityWinRate}% / ROI ${poolMajorityRoi}%(1ラウンド1単位賭けた場合)</p>
   <table><tr><th>Epoch</th><th>Lock</th><th>Close</th><th>結果</th><th>Bull</th><th>Bear</th><th>実勢価格</th><th>状態</th></tr>${rows}</table>
   </body></html>`;
 }
