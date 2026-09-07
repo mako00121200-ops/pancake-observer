@@ -14,24 +14,32 @@ async function poll() {
     else if (Array.isArray(data.data)) markets = data.data;
     else {
       console.log("UNKNOWN_SHAPE keys=" + Object.keys(data).join(","));
-      console.log("RAW_SAMPLE " + JSON.stringify(data).slice(0, 500));
       return;
     }
-
-    console.log(`POLL total=${markets.length}`);
 
     const shortDuration = markets.filter(m => {
       const s = ((m.slug || "") + " " + (m.title || "")).toLowerCase();
       return (s.includes("btc") || s.includes("eth")) &&
-             (s.includes("5min") || s.includes("5-min") || s.includes("hourly") || s.includes("up-or-down") || s.includes("updown"));
+             (s.includes("5-min") || s.includes("15-min") || s.includes("hourly"));
     });
 
-    for (const m of shortDuration) {
-      console.log(`FOUND slug=${m.slug} title="${m.title}" deadline=${m.deadline || m.endDate || m.expirationDate || "?"}`);
-    }
+    console.log(`POLL total=${markets.length} shortDuration=${shortDuration.length}`);
 
-    if (shortDuration.length === 0 && markets.length > 0) {
-      console.log("SAMPLE_TITLES " + markets.slice(0, 5).map(m => m.slug || m.title).join(" | "));
+    // サンプルとして BTC 5分市場を1つだけ選び、板情報と市場詳細を確認する
+    const sample = shortDuration.find(m => (m.slug || "").includes("btc-up-or-down-5-min"));
+    if (sample) {
+      console.log(`SAMPLE_MARKET slug=${sample.slug}`);
+      console.log(`SAMPLE_MARKET_RAW ${JSON.stringify(sample).slice(0, 800)}`);
+
+      const detailRes = await fetch(`${API_BASE}/markets/${sample.slug}`);
+      const detail = await detailRes.json();
+      console.log(`SAMPLE_DETAIL ${JSON.stringify(detail).slice(0, 800)}`);
+
+      const obRes = await fetch(`${API_BASE}/markets/${sample.slug}/orderbook`);
+      const ob = await obRes.json();
+      console.log(`SAMPLE_ORDERBOOK ${JSON.stringify(ob).slice(0, 800)}`);
+    } else {
+      console.log("NO_BTC_5MIN_SAMPLE_FOUND");
     }
   } catch (e) {
     console.error("poll error:", e.message);
